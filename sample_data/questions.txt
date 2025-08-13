@@ -1,0 +1,8 @@
+Scrape the list of highest grossing films from Wikipedia. It is at the URL:
+https://en.wikipedia.org/wiki/List_of_highest-grossing_films
+
+What is the correlation between Rank and Peak in highest grossing films?
+Generate a scatterplot for highest grossing films.
+How many $2 billion movies were released before 2000?
+What is the earliest film to gross over $1.5 billion?
+What is the regression slope for Indian high court cases?
