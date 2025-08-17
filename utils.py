@@ -12,10 +12,23 @@ from bs4 import BeautifulSoup
 import duckdb
 import base64
 import requests
+import json
+import math
 
 url = "https://bing.com/th/id/BCO.f71641e6-a65e-4bd8-947a-6f5d42958d91.png"
 img_data = base64.b64encode(requests.get(url).content).decode("utf-8")
 data_uri = f"data:image/png;base64,{img_data}"
+
+
+def safe_json(data):
+    """Convert data to strict JSON (replace NaN/inf with None)."""
+    def replace_invalid(o):
+        if isinstance(o, float):
+            if math.isnan(o) or math.isinf(o):
+                return None
+        return o
+    return json.loads(json.dumps(data, default=replace_invalid, allow_nan=False))
+
 
 def load_any_file(file):
     try:
@@ -138,12 +151,14 @@ def process_question(question_text, files=None):
         else:
             response = ask_llm(q)
             answers.append(response)
+
     if not answers or all(a in ["Unknown question", "LLM failed", None] for a in answers):
-        return ["Unknown question", "No data available", 0.0, data_uri]
+        return safe_json(["Unknown question", "No data available", 0.0, data_uri])
 
     if len(answers) == 4 and all(isinstance(a, (str, float, int)) for a in answers[:3]):
-        return answers
-    return answers if len(answers) > 1 else answers[0]
+        return safe_json(answers)
+    return safe_json(answers if len(answers) > 1 else answers[0])
+
 
 def encode_chart(fig):
     try:
