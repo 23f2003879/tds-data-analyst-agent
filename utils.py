@@ -1,7 +1,6 @@
 import matplotlib
 matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
 import io
 import pandas as pd
 from io import BytesIO
@@ -10,7 +9,6 @@ import seaborn as sns
 import httpx
 from bs4 import BeautifulSoup
 import duckdb
-import base64
 import requests
 import json
 import math
@@ -38,6 +36,8 @@ def load_any_file(file):
             return pd.read_json(file)
         elif file.filename.endswith(".parquet"):
             return pd.read_parquet(file)
+        elif file.filename.endswith(".xlsx"):
+            return pd.read_excel(file)
         else:
             return None
     except Exception as e:
@@ -131,6 +131,43 @@ def analyze_court_data(files):
     except Exception as e:
         return f"Court data analysis failed: {str(e)}"
 
+def make_temp_line_chart(df):
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(df["date"], df["temp_c"], color="red")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Temperature (°C)")
+    return encode_chart(fig)
+
+def make_precip_histogram(df):
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(df["precip_mm"], bins=10, color="orange")
+    ax.set_xlabel("Precipitation (mm)")
+    ax.set_ylabel("Frequency")
+    return encode_chart(fig)
+
+def process_weather(df):
+    try:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["temp_c"] = pd.to_numeric(df["temp_c"], errors="coerce")
+        df["precip_mm"] = pd.to_numeric(df["precip_mm"], errors="coerce")
+
+        result = {
+            "average_temp_c": float(df["temp_c"].mean(skipna=True)),
+            "max_precip_date": str(df.loc[df["precip_mm"].idxmax(), "date"]),
+            "min_temp_c": float(df["temp_c"].min(skipna=True)),
+            "temp_precip_correlation": float(df["temp_c"].corr(df["precip_mm"])),
+            "average_precip_mm": float(df["precip_mm"].mean(skipna=True)),
+            "temp_line_chart": make_temp_line_chart(df),
+            "precip_histogram": make_precip_histogram(df)
+        }
+
+        for k, v in result.items():
+            if isinstance(v, float) and (pd.isna(v) or v in [float("inf"), float("-inf")]):
+                result[k] = None
+
+        return result
+    except Exception as e:
+        return {"error": str(e), "fallback": "Could not process weather data"}
 
 
 def process_question(question_text, files=None):
@@ -143,6 +180,12 @@ def process_question(question_text, files=None):
             for name, file in files.items():
                 df = load_any_file(file)
                 if df is not None:
+                    break
+        if "weather" in q.lower():
+            for name, file in files.items():
+                if name.endswith(".csv"):
+                    df = pd.read_csv(file)
+                    answers.append(process_weather(df))
                     break
 
         if df is not None:
