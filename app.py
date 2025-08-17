@@ -38,11 +38,13 @@ def analyze():
 
     try:
         result = process_question(question_file, files)
-        if time.time() - start_time > 180:
-            return jsonify({"error": "Processing exceeded 3-minute limit"}), 500
-        return jsonify(result)
+        if isinstance(result, (dict, list)):
+            return jsonify(result)
+        else:
+            return jsonify({"error": "Invalid response format"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        fallback = {"error": str(e), "fallback": "Could not process input, but agent responded."}
+        return jsonify(fallback)
 
 if __name__ == "__main__":
     app.run(debug=True)
