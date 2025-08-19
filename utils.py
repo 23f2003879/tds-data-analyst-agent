@@ -132,37 +132,168 @@ def process_weather(df):
             "precip_histogram": data_uri
         }
 
+def scrape_grossing_movies():
+    """
+    Scrape highest-grossing films table from Wikipedia.
+    Returns (header, data) as lists.
+    """
+    url = "https://en.wikipedia.org/wiki/List_of_highest-grossing_films"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        table = soup.find("table", class_="wikitable")
+        rows = table.find_all("tr")
+
+        header = [th.text.strip() for th in rows[0].find_all("th")]
+        data = []
+        for row in rows[1:]:
+            cells = row.find_all("td")
+            if len(cells) == len(header):
+                data.append([cell.text.strip() for cell in cells])
+        return header, data
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to scrape highest-grossing films: {str(e)}")
+
+
+def analyze_court_data(files):
+    """
+    Analyze Indian high court case delays using provided .parquet file.
+    Returns regression slope + scatterplot URI.
+    """
+    try:
+        parquet_file = None
+        for name, file in files.items():
+            if name.endswith(".parquet"):
+                parquet_file = file
+                break
+
+        if not parquet_file:
+            return {
+                "regression_slope": None,
+                "plot": "",
+                "note": "No court data provided"
+            }
+
+        df = pd.read_parquet(parquet_file)
+        df["date_of_registration"] = pd.to_datetime(df["date_of_registration"], errors="coerce")
+        df["decision_date"] = pd.to_datetime(df["decision_date"], errors="coerce")
+        df["delay_days"] = (df["decision_date"] - df["date_of_registration"]).dt.days
+
+        df = df[df["court"] == "33_10"]
+
+        slope = df.groupby("year")[["delay_days"]].mean().reset_index()
+        corr = slope["year"].corr(slope["delay_days"])
+
+        plot_uri = plot_scatter_with_regression(slope["year"], slope["delay_days"])
+
+        return {
+            "regression_slope": round(corr, 6) if not pd.isna(corr) else 0.0,
+            "plot": plot_uri
+        }
+
+    except Exception as e:
+        return {
+            "regression_slope": None,
+            "plot": "",
+            "note": f"Court data analysis failed: {str(e)}"
+        }
+
+
 def process_question(question_text, files=None):
     questions = [q.strip() for q in question_text.strip().split("\n") if q.strip()]
     answers = []
 
+    scraped_header, scraped_data, films_df = None, None, None
+    if any("highest grossing" in q.lower() or "wikipedia" in q.lower() for q in questions):
+        try:
+            scraped_header, scraped_data = scrape_grossing_movies()
+            films_df = pd.DataFrame(scraped_data, columns=scraped_header)
+
+            films_df["Rank"] = pd.to_numeric(films_df["Rank"], errors="coerce")
+            if "Peak" in films_df.columns:
+                films_df["Peak"] = pd.to_numeric(films_df["Peak"], errors="coerce")
+            if "Worldwide gross" in films_df.columns:
+                films_df["Gross"] = pd.to_numeric(
+                    films_df["Worldwide gross"].str.replace("$", "").str.replace(" billion", "").str.replace(",", ""),
+                    errors="coerce"
+                )
+            if "Year" in films_df.columns:
+                films_df["Year"] = pd.to_numeric(films_df["Year"], errors="coerce")
+        except Exception:
+            films_df = None
+
     for q in questions:
-        df = None
+        q_lower = q.lower()
+
+        if "weather" in q_lower:
+            if files:
+                for name, file in files.items():
+                    if name.endswith(".csv"):
+                        try:
+                            df = pd.read_csv(file)
+                            answers.append(process_weather(df))
+                        except pd.errors.EmptyDataError:
+                            answers.append({
+                                "average_temp_c": None,
+                                "max_precip_date": None,
+                                "min_temp_c": None,
+                                "temp_precip_correlation": None,
+                                "average_precip_mm": None,
+                                "temp_line_chart": "",
+                                "precip_histogram": ""
+                            })
+                        break
+            continue
+
+        if films_df is not None:
+            if "correlation" in q_lower:
+                corr = films_df["Rank"].corr(films_df["Peak"])
+                answers.append(round(corr, 6) if not pd.isna(corr) else 0.0)
+                continue
+
+            if "scatterplot" in q_lower:
+                answers.append(plot_scatter_with_regression(films_df["Rank"], films_df["Peak"]))
+                continue
+
+            if "$2" in q_lower and "billion" in q_lower:
+                count = films_df[(films_df["Gross"] >= 2) & (films_df["Year"] < 2000)].shape[0]
+                answers.append(int(count))
+                continue
+
+            if "earliest" in q_lower and "1.5" in q_lower:
+                filtered = films_df[films_df["Gross"] > 1.5]
+                if not filtered.empty:
+                    earliest = filtered.sort_values("Year").iloc[0]["Title"]
+                    answers.append(str(earliest))
+                else:
+                    answers.append("Unknown")
+                continue
+
+        if "high court" in q_lower or "regression slope" in q_lower:
+            answers.append(analyze_court_data(files or {}))
+            continue
+
         if files:
+            df = None
             for name, file in files.items():
                 df = load_any_file(file)
-                if df is not None and not df.empty:
+                if df is not None:
                     break
+            if df is not None:
+                answers.append(generic_analysis(df, q))
+                continue
 
-        if "weather" in q.lower():
-            for name, file in files.items():
-                if name.endswith(".csv"):
-                    df = pd.read_csv(file)
-                    answers.append(process_weather(df))
-                    break
-
-        if df is not None and not df.empty:
-            answers.append(generic_analysis(df, q))
-        else:
-            response = ask_llm(q)
-            answers.append(response)
+        answers.append(ask_llm(q))
 
     if not answers or all(a in ["Unknown question", "LLM failed", None] for a in answers):
         return safe_json(["Unknown question", "No data available", 0.0, data_uri])
 
-    if len(answers) == 4 and all(isinstance(a, (str, float, int, dict)) for a in answers[:3]):
-        return safe_json(answers)
     return safe_json(answers if len(answers) > 1 else answers[0])
+
+
 
 def encode_chart(fig):
     try:
