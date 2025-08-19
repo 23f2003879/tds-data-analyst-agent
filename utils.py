@@ -132,166 +132,113 @@ def process_weather(df):
             "precip_histogram": data_uri
         }
 
-def scrape_grossing_movies():
-    """
-    Scrape highest-grossing films table from Wikipedia.
-    Returns (header, data) as lists.
-    """
-    url = "https://en.wikipedia.org/wiki/List_of_highest-grossing_films"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        table = soup.find("table", class_="wikitable")
-        rows = table.find_all("tr")
-
-        header = [th.text.strip() for th in rows[0].find_all("th")]
-        data = []
-        for row in rows[1:]:
-            cells = row.find_all("td")
-            if len(cells) == len(header):
-                data.append([cell.text.strip() for cell in cells])
-        return header, data
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to scrape highest-grossing films: {str(e)}")
-
-
-def analyze_court_data(files):
-    """
-    Analyze Indian high court case delays using provided .parquet file.
-    Returns regression slope + scatterplot URI.
-    """
-    try:
-        parquet_file = None
-        for name, file in files.items():
-            if name.endswith(".parquet"):
-                parquet_file = file
-                break
-
-        if not parquet_file:
-            return {
-                "regression_slope": None,
-                "plot": "",
-                "note": "No court data provided"
-            }
-
-        df = pd.read_parquet(parquet_file)
-        df["date_of_registration"] = pd.to_datetime(df["date_of_registration"], errors="coerce")
-        df["decision_date"] = pd.to_datetime(df["decision_date"], errors="coerce")
-        df["delay_days"] = (df["decision_date"] - df["date_of_registration"]).dt.days
-
-        df = df[df["court"] == "33_10"]
-
-        slope = df.groupby("year")[["delay_days"]].mean().reset_index()
-        corr = slope["year"].corr(slope["delay_days"])
-
-        plot_uri = plot_scatter_with_regression(slope["year"], slope["delay_days"])
-
-        return {
-            "regression_slope": round(corr, 6) if not pd.isna(corr) else 0.0,
-            "plot": plot_uri
-        }
-
-    except Exception as e:
-        return {
-            "regression_slope": None,
-            "plot": "",
-            "note": f"Court data analysis failed: {str(e)}"
-        }
-
 
 def process_question(question_text, files=None):
+    """
+    Handles multi-part analytical questions robustly and safely,
+    without relying on hardcoded data or assumptions about inputs.
+    """
+
     questions = [q.strip() for q in question_text.strip().split("\n") if q.strip()]
     answers = []
 
-    scraped_header, scraped_data, films_df = None, None, None
-    if any("highest grossing" in q.lower() or "wikipedia" in q.lower() for q in questions):
-        try:
-            scraped_header, scraped_data = scrape_grossing_movies()
-            films_df = pd.DataFrame(scraped_data, columns=scraped_header)
-
-            films_df["Rank"] = pd.to_numeric(films_df["Rank"], errors="coerce")
-            if "Peak" in films_df.columns:
-                films_df["Peak"] = pd.to_numeric(films_df["Peak"], errors="coerce")
-            if "Worldwide gross" in films_df.columns:
-                films_df["Gross"] = pd.to_numeric(
-                    films_df["Worldwide gross"].str.replace("$", "").str.replace(" billion", "").str.replace(",", ""),
-                    errors="coerce"
-                )
-            if "Year" in films_df.columns:
-                films_df["Year"] = pd.to_numeric(films_df["Year"], errors="coerce")
-        except Exception:
-            films_df = None
-
     for q in questions:
         q_lower = q.lower()
-
-        if "weather" in q_lower:
-            if files:
-                for name, file in files.items():
-                    if name.endswith(".csv"):
-                        try:
-                            df = pd.read_csv(file)
-                            answers.append(process_weather(df))
-                        except pd.errors.EmptyDataError:
-                            answers.append({
-                                "average_temp_c": None,
-                                "max_precip_date": None,
-                                "min_temp_c": None,
-                                "temp_precip_correlation": None,
-                                "average_precip_mm": None,
-                                "temp_line_chart": "",
-                                "precip_histogram": ""
-                            })
-                        break
-            continue
-
-        if films_df is not None:
-            if "correlation" in q_lower:
-                corr = films_df["Rank"].corr(films_df["Peak"])
-                answers.append(round(corr, 6) if not pd.isna(corr) else 0.0)
-                continue
-
-            if "scatterplot" in q_lower:
-                answers.append(plot_scatter_with_regression(films_df["Rank"], films_df["Peak"]))
-                continue
-
-            if "$2" in q_lower and "billion" in q_lower:
-                count = films_df[(films_df["Gross"] >= 2) & (films_df["Year"] < 2000)].shape[0]
-                answers.append(int(count))
-                continue
-
-            if "earliest" in q_lower and "1.5" in q_lower:
-                filtered = films_df[films_df["Gross"] > 1.5]
-                if not filtered.empty:
-                    earliest = filtered.sort_values("Year").iloc[0]["Title"]
-                    answers.append(str(earliest))
-                else:
-                    answers.append("Unknown")
-                continue
-
-        if "high court" in q_lower or "regression slope" in q_lower:
-            answers.append(analyze_court_data(files or {}))
-            continue
+        df = None
 
         if files:
-            df = None
             for name, file in files.items():
-                df = load_any_file(file)
-                if df is not None:
-                    break
-            if df is not None:
-                answers.append(generic_analysis(df, q))
+                try:
+                    if name.endswith(".csv"):
+                        df = pd.read_csv(file)
+                    elif name.endswith(".xlsx"):
+                        df = pd.read_excel(file)
+                    elif name.endswith(".json"):
+                        df = pd.read_json(file)
+                    elif name.endswith(".parquet"):
+                        df = pd.read_parquet(file)
+                    if df is not None:
+                        break
+                except Exception:
+                    df = None
+
+        if "weather" in q_lower and df is not None:
+            try:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                df["temp_c"] = pd.to_numeric(df["temp_c"], errors="coerce")
+                df["precip_mm"] = pd.to_numeric(df["precip_mm"], errors="coerce")
+
+                result = {
+                    "average_temp_c": df["temp_c"].mean(skipna=True),
+                    "max_precip_date": str(df.loc[df["precip_mm"].idxmax(), "date"])
+                    if not df["precip_mm"].isna().all()
+                    else None,
+                    "min_temp_c": df["temp_c"].min(skipna=True),
+                    "temp_precip_correlation": df["temp_c"].corr(df["precip_mm"]),
+                    "average_precip_mm": df["precip_mm"].mean(skipna=True),
+                }
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.plot(df["date"], df["temp_c"], color="red")
+                ax.set_xlabel("Date")
+                ax.set_ylabel("Temperature (°C)")
+                result["temp_line_chart"] = encode_chart(fig)
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.hist(df["precip_mm"], bins=10, color="blue")
+                ax.set_xlabel("Precipitation (mm)")
+                ax.set_ylabel("Frequency")
+                result["precip_histogram"] = encode_chart(fig)
+
+                answers.append(result)
+                continue
+            except Exception as e:
+                answers.append({"error": f"Weather analysis failed: {str(e)}"})
                 continue
 
-        answers.append(ask_llm(q))
+        if "correlation" in q_lower and df is not None:
+            numeric_cols = df.select_dtypes(include=["number"]).columns
+            if len(numeric_cols) >= 2:
+                try:
+                    corr = df[numeric_cols[0]].corr(df[numeric_cols[1]])
+                    answers.append(round(corr, 6))
+                    continue
+                except Exception:
+                    answers.append(None)
+                    continue
 
-    if not answers or all(a in ["Unknown question", "LLM failed", None] for a in answers):
-        return safe_json(["Unknown question", "No data available", 0.0, data_uri])
+        if "scatter" in q_lower and df is not None:
+            numeric_cols = df.select_dtypes(include=["number"]).columns
+            if len(numeric_cols) >= 2:
+                try:
+                    fig, ax = plt.subplots(figsize=(6, 4))
+                    sns.regplot(x=df[numeric_cols[0]], y=df[numeric_cols[1]], ax=ax,
+                                scatter_kws={"color": "blue"},
+                                line_kws={"color": "red"})
+                    ax.set_xlabel(numeric_cols[0])
+                    ax.set_ylabel(numeric_cols[1])
+                    answers.append(encode_chart(fig))
+                    continue
+                except Exception:
+                    answers.append("")
+                    continue
 
-    return safe_json(answers if len(answers) > 1 else answers[0])
+        if df is not None:
+            try:
+                summary = df.describe(include="all").to_dict()
+                answers.append({
+                    "summary": summary,
+                    "columns": df.columns.tolist(),
+                    "rows": len(df)
+                })
+                continue
+            except Exception as e:
+                answers.append({"error": f"Generic analysis failed: {str(e)}"})
+                continue
+
+        answers.append(f"Could not analyze: {q}")
+
+    return answers if len(answers) > 1 else answers[0]
 
 
 
