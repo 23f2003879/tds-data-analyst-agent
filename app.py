@@ -37,11 +37,10 @@ def analyze():
     files = {k: v for k, v in request.files.items() if k.lower() != "questions.txt"}
     print("Received files:", list(request.files.keys()))
 
-
     try:
         result = process_question(question_file, files)
         if time.time() - start_time > 180:
-           return jsonify({"error": "Processing exceeded 3-minute limit"}), 500
+            return jsonify({"error": "Processing exceeded 3-minute limit"}), 500
         if isinstance(result, (dict, list)):
             return jsonify(result)
         else:
@@ -51,4 +50,4 @@ def analyze():
         return jsonify(fallback)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)

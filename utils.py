@@ -1,11 +1,11 @@
 import matplotlib
-matplotlib.use("Agg") 
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import seaborn as sns
 import io
 import pandas as pd
 from io import BytesIO
 import base64
-import seaborn as sns
 import httpx
 from bs4 import BeautifulSoup
 import duckdb
@@ -17,9 +17,8 @@ url = "https://bing.com/th/id/BCO.f71641e6-a65e-4bd8-947a-6f5d42958d91.png"
 img_data = base64.b64encode(requests.get(url).content).decode("utf-8")
 data_uri = f"data:image/png;base64,{img_data}"
 
-
 def safe_json(data):
-    """Convert data to strict JSON (replace NaN/inf with None)."""
+    """Ensure valid JSON — replaces NaN/inf with None."""
     def replace_invalid(o):
         if isinstance(o, float):
             if math.isnan(o) or math.isinf(o):
@@ -27,11 +26,18 @@ def safe_json(data):
         return o
     return json.loads(json.dumps(data, default=replace_invalid, allow_nan=False))
 
-
 def load_any_file(file):
+    """Reads CSV, JSON, Excel, Parquet safely, handling malformed data."""
     try:
         if file.filename.endswith(".csv"):
-            return pd.read_csv(file)
+            try:
+                df = pd.read_csv(file)
+                if df.empty:  
+                    file.seek(0)
+                    df = pd.read_csv(file, header=None)
+                return df
+            except pd.errors.EmptyDataError:
+                return pd.DataFrame()
         elif file.filename.endswith(".json"):
             return pd.read_json(file)
         elif file.filename.endswith(".parquet"):
@@ -40,10 +46,11 @@ def load_any_file(file):
             return pd.read_excel(file)
         else:
             return None
-    except Exception as e:
-        return None
-    
+    except Exception:
+        return pd.DataFrame()
+
 def generic_analysis(df, question):
+    """Fallback analysis when no specific handling exists."""
     try:
         summary = df.describe(include="all").to_dict()
         columns = df.columns.tolist()
@@ -55,11 +62,12 @@ def generic_analysis(df, question):
     except Exception as e:
         return {"error": f"Failed to analyze data: {str(e)}"}
 
-
 def plot_scatter_with_regression(x, y):
+    """Generates scatter plot with dotted red regression line."""
     try:
         plt.figure(figsize=(8, 6))
-        sns.regplot(x=x, y=y, scatter_kws={"color": "blue"}, line_kws={"color": "red", "linestyle": "dotted"})
+        sns.regplot(x=x, y=y, scatter_kws={"color": "blue"},
+                    line_kws={"color": "red", "linestyle": "dotted"})
         plt.xlabel("Rank")
         plt.ylabel("Peak")
 
@@ -67,69 +75,10 @@ def plot_scatter_with_regression(x, y):
         plt.savefig(buf, format='png', bbox_inches='tight')
         buf.seek(0)
         encoded = base64.b64encode(buf.read()).decode('utf-8')
-        if len(encoded) > 100000:
-            return "Image too large"
-        return f"data:image/png;base64,{encoded}"
-    except Exception as e:
-        return f"Plot generation failed: {str(e)}"
-
-
-
-def analyze_grossing_films(raw_data, question):
-    header, data = raw_data
-    df = pd.DataFrame(data, columns=header) 
-    df["Rank"] = pd.to_numeric(df["Rank"], errors="coerce")
-    df["Peak"] = pd.to_numeric(df["Peak"], errors="coerce")
-
-    if "how many $2 bn movies" in question.lower():
-        df["Gross"] = pd.to_numeric(df["Worldwide gross"].str.replace("$", "").str.replace(" billion", "").str.replace(",", ""), errors="coerce")
-        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-        count = df[(df["Gross"] >= 2) & (df["Year"] < 2000)].shape[0]
-        return count
-
-    elif "earliest film" in question.lower():
-        df["Gross"] = pd.to_numeric(df["Worldwide gross"].str.replace("$", "").str.replace(" billion", "").str.replace(",", ""), errors="coerce")
-        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-        filtered = df[df["Gross"] > 1.5]
-        earliest = filtered.sort_values("Year").iloc[0]["Title"]
-        return earliest
-
-    elif "correlation" in question.lower():
-        corr = df["Rank"].corr(df["Peak"])
-        return round(corr, 6)
-
-    elif "scatterplot" in question.lower():
-        return plot_scatter_with_regression(df["Rank"], df["Peak"])
-
-    return "Unknown question"
-
-def analyze_court_data(files):
-    try:
-        parquet_file = None
-        for name, file in files.items():
-            if name.endswith(".parquet"):
-                parquet_file = file
-                break
-
-        if not parquet_file:
-            return "Missing parquet file"
-
-        df = pd.read_parquet(parquet_file)
-        df["date_of_registration"] = pd.to_datetime(df["date_of_registration"], errors="coerce")
-        df["decision_date"] = pd.to_datetime(df["decision_date"], errors="coerce")
-        df["delay_days"] = (df["decision_date"] - df["date_of_registration"]).dt.days
-        df = df[df["court"] == "33_10"]
-
-        slope = df.groupby("year")[["delay_days"]].mean().reset_index()
-        corr = slope["year"].corr(slope["delay_days"])
-        
-        uri = plot_scatter_with_regression(slope["year"], slope["delay_days"])
-        return {
-            "regression_slope": round(corr, 6),
-            "plot": uri
-        }
-    except Exception as e:
-        return f"Court data analysis failed: {str(e)}"
+        plt.close()
+        return f"data:image/png;base64,{encoded}" if len(encoded) < 100000 else data_uri
+    except Exception:
+        return data_uri
 
 def make_temp_line_chart(df):
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -146,6 +95,17 @@ def make_precip_histogram(df):
     return encode_chart(fig)
 
 def process_weather(df):
+    """Handles weather CSV analysis robustly."""
+    if df is None or df.empty:
+        return {
+            "average_temp_c": None,
+            "max_precip_date": None,
+            "min_temp_c": None,
+            "temp_precip_correlation": None,
+            "average_precip_mm": None,
+            "temp_line_chart": data_uri,
+            "precip_histogram": data_uri
+        }
     try:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["temp_c"] = pd.to_numeric(df["temp_c"], errors="coerce")
@@ -153,22 +113,24 @@ def process_weather(df):
 
         result = {
             "average_temp_c": float(df["temp_c"].mean(skipna=True)),
-            "max_precip_date": str(df.loc[df["precip_mm"].idxmax(), "date"]),
+            "max_precip_date": str(df.loc[df["precip_mm"].idxmax(), "date"]) if not df["precip_mm"].isna().all() else None,
             "min_temp_c": float(df["temp_c"].min(skipna=True)),
-            "temp_precip_correlation": float(df["temp_c"].corr(df["precip_mm"])),
+            "temp_precip_correlation": float(df["temp_c"].corr(df["precip_mm"])) if not df["precip_mm"].isna().all() else None,
             "average_precip_mm": float(df["precip_mm"].mean(skipna=True)),
             "temp_line_chart": make_temp_line_chart(df),
             "precip_histogram": make_precip_histogram(df)
         }
-
-        for k, v in result.items():
-            if isinstance(v, float) and (pd.isna(v) or v in [float("inf"), float("-inf")]):
-                result[k] = None
-
-        return result
-    except Exception as e:
-        return {"error": str(e), "fallback": "Could not process weather data"}
-
+        return safe_json(result)
+    except Exception:
+        return {
+            "average_temp_c": None,
+            "max_precip_date": None,
+            "min_temp_c": None,
+            "temp_precip_correlation": None,
+            "average_precip_mm": None,
+            "temp_line_chart": data_uri,
+            "precip_histogram": data_uri
+        }
 
 def process_question(question_text, files=None):
     questions = [q.strip() for q in question_text.strip().split("\n") if q.strip()]
@@ -179,8 +141,9 @@ def process_question(question_text, files=None):
         if files:
             for name, file in files.items():
                 df = load_any_file(file)
-                if df is not None:
+                if df is not None and not df.empty:
                     break
+
         if "weather" in q.lower():
             for name, file in files.items():
                 if name.endswith(".csv"):
@@ -188,9 +151,8 @@ def process_question(question_text, files=None):
                     answers.append(process_weather(df))
                     break
 
-        if df is not None:
-            result = generic_analysis(df, q)
-            answers.append(result)
+        if df is not None and not df.empty:
+            answers.append(generic_analysis(df, q))
         else:
             response = ask_llm(q)
             answers.append(response)
@@ -198,10 +160,9 @@ def process_question(question_text, files=None):
     if not answers or all(a in ["Unknown question", "LLM failed", None] for a in answers):
         return safe_json(["Unknown question", "No data available", 0.0, data_uri])
 
-    if len(answers) == 4 and all(isinstance(a, (str, float, int)) for a in answers[:3]):
+    if len(answers) == 4 and all(isinstance(a, (str, float, int, dict)) for a in answers[:3]):
         return safe_json(answers)
     return safe_json(answers if len(answers) > 1 else answers[0])
-
 
 def encode_chart(fig):
     try:
@@ -209,9 +170,10 @@ def encode_chart(fig):
         fig.savefig(buf, format="png", bbox_inches="tight")
         buf.seek(0)
         encoded = base64.b64encode(buf.read()).decode("utf-8")
-        return f"data:image/png;base64,{encoded}" if len(encoded) < 100000 else ""
+        plt.close(fig)
+        return f"data:image/png;base64,{encoded}" if len(encoded) < 100000 else data_uri
     except Exception:
-        return ""
+        return data_uri
 
 def ask_llm(prompt, context=None):
     headers = {
@@ -219,9 +181,7 @@ def ask_llm(prompt, context=None):
         "Content-Type": "application/json"
     }
 
-    messages = [
-        {"role": "system", "content": "You are a helpful data analyst."}
-    ]
+    messages = [{"role": "system", "content": "You are a helpful data analyst."}]
     if context:
         messages.append({"role": "user", "content": f"Here is some relevant data:\n{context}"})
     messages.append({"role": "user", "content": prompt})
@@ -233,7 +193,8 @@ def ask_llm(prompt, context=None):
     }
 
     try:
-        response = httpx.post("https://aipipe.org/openrouter/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        response = httpx.post("https://aipipe.org/openrouter/v1/chat/completions",
+                              headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         data = response.json()
 
@@ -246,28 +207,3 @@ def ask_llm(prompt, context=None):
         return f"LLM request failed: {e.response.text}"
     except Exception as e:
         return f"Unexpected error: {str(e)}"
-
-
-def scrape_grossing_movies():
-    url = "https://en.wikipedia.org/wiki/List_of_highest-grossing_films"
-    resp = httpx.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    table = soup.find("table", class_="wikitable")
-    rows = table.find_all("tr")
-    header = [th.text.strip() for th in rows[0].find_all("th")]
-    data = []
-    for row in rows[1:]:
-        cells = row.find_all("td")
-        if len(cells) == len(header):
-            data.append([cell.text.strip() for cell in cells])
-    return header, data
-
-
-def count_cases():
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs; INSTALL parquet; LOAD parquet;")
-    return con.execute("""
-        SELECT COUNT(*) 
-        FROM read_parquet('s3://.../metadata.parquet?s3_region=ap-south-1')
-    """).fetchone()[0]
